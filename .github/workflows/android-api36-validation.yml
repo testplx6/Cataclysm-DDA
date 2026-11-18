@@ -27,6 +27,9 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: ''
       - name: Provision Android SDK and build dependencies
         run: |
           sudo apt-get update -qq
@@ -67,7 +70,7 @@ jobs:
           set -euo pipefail
           tools="$ANDROID_HOME/build-tools/36.0.0"
           mkdir -p validation
-          apk=$(find android/app/build/outputs/apk/experimental/release -name "*-$ABI-*.apk" -print -quit)
+          apk=$(find android/app/build/outputs/apk/experimental/release -name '*.apk' -print -quit)
           [[ -n "$apk" ]]
           "$tools/zipalign" -P 16 -f 4 "$apk" "$RUNNER_TEMP/cdda-aligned.apk"
           keytool -genkeypair -keystore "$RUNNER_TEMP/cdda-test.jks" -storepass android -keypass android -keyalg RSA -keysize 2048 -alias cdda-test -validity 365 -dname 'CN=CDDA API 36 CI test'
@@ -104,7 +107,7 @@ jobs:
           sdkmanager 'emulator' 'platform-tools' "$image"
           sudo setfacl -m "u:$(id -un):rw" /dev/kvm
           printf 'no\n' | avdmanager create avd --name cdda-api36 --package "$image" --force
-          emulator -avd cdda-api36 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >validation/emulator.log 2>&1 &
+          "$ANDROID_HOME/emulator/emulator" -avd cdda-api36 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >validation/emulator.log 2>&1 &
           timeout 300 adb wait-for-device
           timeout 300 bash -c 'until [[ $(adb shell getprop sys.boot_completed | tr -d "\r") == 1 ]]; do sleep 2; done'
           adb shell input keyevent 82
