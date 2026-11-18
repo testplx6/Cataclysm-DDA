@@ -1,0 +1,125 @@
+name: Android API 36 validation
+on:
+  push:
+    branches: [android/api-36-ci]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-api36-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  android:
+    name: Build and verify (${{ matrix.abi }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            gradle: -Pabi_arm_32=false
+          - abi: x86_64
+            gradle: -Pabi_arm_32=false -Pabi_arm_64=false -Pabi_x86_64=true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Provision Android SDK and build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ccache gettext
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.1.13356709' 'cmake;3.22.1'
+      - name: Apply API 36 build settings to the test checkout
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          changes = {
+              'android/gradle.properties': [('override_compileSdkVersion=35', 'override_compileSdkVersion=36'), ('override_targetSdkVersion=35', 'override_targetSdkVersion=36')],
+              'android/build.gradle': [('gradle:8.7.3', 'gradle:8.10.1')],
+              'android/gradle/wrapper/gradle-wrapper.properties': [('gradle-8.9-bin.zip', 'gradle-8.11.1-bin.zip')],
+          }
+          for filename, edits in changes.items():
+              path = Path(filename)
+              source = path.read_text()
+              for old, new in edits:
+                  assert source.count(old) == 1, (filename, old)
+                  source = source.replace(old, new)
+              path.write_text(source)
+          PY
+      - name: Compile experimental release
+        working-directory: android
+        env:
+          ABI: ${{ matrix.abi }}
+          ABI_FLAGS: ${{ matrix.gradle }}
+        run: |
+          tasks=(assembleExperimentalRelease)
+          if [[ "$ABI" == arm64-v8a ]]; then tasks+=(bundleExperimentalRelease); fi
+          read -r -a abi_flags <<< "$ABI_FLAGS"
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace -Pj=3 "${abi_flags[@]}" "${tasks[@]}"
+      - name: Sign APK for testing and verify target API and native alignment
+        env:
+          ABI: ${{ matrix.abi }}
+        run: |
+          set -euo pipefail
+          tools="$ANDROID_HOME/build-tools/36.0.0"
+          mkdir -p validation
+          apk=$(find android/app/build/outputs/apk/experimental/release -name "*-$ABI-*.apk" -print -quit)
+          [[ -n "$apk" ]]
+          "$tools/zipalign" -P 16 -f 4 "$apk" "$RUNNER_TEMP/cdda-aligned.apk"
+          keytool -genkeypair -keystore "$RUNNER_TEMP/cdda-test.jks" -storepass android -keypass android -keyalg RSA -keysize 2048 -alias cdda-test -validity 365 -dname 'CN=CDDA API 36 CI test'
+          signed="validation/cdda-api36-$ABI-test.apk"
+          "$tools/apksigner" sign --ks "$RUNNER_TEMP/cdda-test.jks" --ks-pass pass:android --key-pass pass:android --out "$signed" "$RUNNER_TEMP/cdda-aligned.apk"
+          "$tools/apksigner" verify "$signed"
+          "$tools/zipalign" -P 16 -c 4 "$signed"
+          "$tools/aapt" dump badging "$signed" | tee validation/apk-manifest.txt
+          grep -Fx "targetSdkVersion:'36'" validation/apk-manifest.txt
+          if [[ "$ABI" == arm64-v8a ]]; then
+            cp android/app/build/outputs/bundle/experimentalRelease/*.aab validation/cdda-api36-unsigned.aab
+          fi
+          python3 - "$signed" <<'PY' | tee validation/native-alignment.txt
+          import struct
+          import sys
+          import zipfile
+          with zipfile.ZipFile(sys.argv[1]) as apk:
+              libraries = [name for name in apk.namelist() if name.startswith('lib/') and name.endswith('.so')]
+              assert libraries, 'APK contains no native libraries'
+              for name in libraries:
+                  data = apk.read(name)
+                  assert data.startswith(b'\x7fELF\x02\x01'), name
+                  offset = struct.unpack_from('<Q', data, 32)[0]
+                  size, count = struct.unpack_from('<HH', data, 54)
+                  alignment = [struct.unpack_from('<Q', data, pos + 48)[0] for pos in range(offset, offset + size * count, size) if struct.unpack_from('<I', data, pos)[0] == 1]
+                  assert alignment and min(alignment) >= 16384, (name, alignment)
+                  print(f'{name}: LOAD alignment {alignment}')
+          PY
+      - name: Launch CDDA on an Android 16 emulator
+        if: matrix.abi == 'x86_64'
+        run: |
+          set -euo pipefail
+          image='system-images;android-36;google_apis;x86_64'
+          sdkmanager 'emulator' 'platform-tools' "$image"
+          sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+          printf 'no\n' | avdmanager create avd --name cdda-api36 --package "$image" --force
+          emulator -avd cdda-api36 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >validation/emulator.log 2>&1 &
+          timeout 300 adb wait-for-device
+          timeout 300 bash -c 'until [[ $(adb shell getprop sys.boot_completed | tr -d "\r") == 1 ]]; do sleep 2; done'
+          adb shell input keyevent 82
+          adb install validation/cdda-api36-x86_64-test.apk
+          app=com.cleverraven.cataclysmdda.experimental
+          adb shell monkey -p "$app" -c android.intent.category.LAUNCHER 1
+          timeout 150 bash -c 'until adb shell dumpsys activity activities | grep -E "topResumedActivity|mResumedActivity" | grep -Eq "com\.cleverraven\.cataclysmdda\.experimental.*CataclysmDDA"; do sleep 3; done'
+          adb shell pidof "$app"
+          adb exec-out screencap -p >validation/android16.png
+          adb logcat -b crash -d >validation/android16-crash.log
+          if grep -F "Process: $app," validation/android16-crash.log; then exit 1; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cdda-api36-${{ matrix.abi }}
+          path: validation/
+          if-no-files-found: ignore
+          retention-days: 14
