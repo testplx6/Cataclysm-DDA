@@ -142,8 +142,9 @@ def sdl3Aars = [
      zipSha256: 'f676e29b1b4eb990e24862b6af5f327379dc496c9f5f3e3f48ab75837f95844e'],
     [name: 'SDL3_image',  version: '3.4.4', repo: 'SDL_image',
      zipSha256: 'a0d1e27d4529c2bbc3e4ac72d2e6c0dd474b32cfe2586d22c4228a34224d1f57'],
-    [name: 'SDL3_ttf',    version: '3.2.2', repo: 'SDL_ttf',
-     zipSha256: '48e534daf88eec5c7f0c95fa6ca0e8a5f38f5fc7276824573131cebc403ee14c'],
+    [name: 'SDL3_ttf',    version: '3.2.3',
+     url: 'https://github.com/testplx6/Cataclysm-DDA/releases/download/sdl3-ttf-3.2.3-android-16k/SDL3_ttf-devel-3.2.3-android.zip',
+     zipSha256: '7cd1f3afc6e44740edc0546a89f2b4e5c2e859f451b82aa625a9f6532c262b09'],
     [name: 'SDL3_mixer',  version: '3.2.4', repo: 'SDL_mixer',
      zipSha256: 'b7f9f1ee5162a0492e71941f2cbdc50ec256ef15c0e995ca72c7e519eebd810d'],
 ]
@@ -165,7 +166,7 @@ task fetchSdl3Aars {
             def zipName = "${entry.name}-devel-${entry.version}-android.zip"
             def zipFile = new File(cacheDir, zipName)
             if (!zipFile.exists()) {
-                def url = "https://github.com/libsdl-org/${entry.repo}/releases/download/release-${entry.version}/${zipName}"
+                def url = entry.url ?: "https://github.com/libsdl-org/${entry.repo}/releases/download/release-${entry.version}/${zipName}"
                 println("Downloading ${url}")
                 new URL(url).withInputStream { input ->
                     zipFile.withOutputStream { output -> output << input }
