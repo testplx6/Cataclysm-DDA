@@ -405,9 +405,9 @@ The Gradle project lives under `android/`. Build it from the command line or ope
 ### Dependencies
 
   * Java JDK 17 (Temurin or another distribution)
-  * Android SDK with platform 35 and command-line tools
-  * Android NDK 28.1.13356709 (r28b) - bundled 16 KB page-size alignment is required for Play under targetSdk 35
-  * AGP 8.7 and Gradle 8.9 (Gradle wrapper auto-downloads)
+  * Android SDK with platform 36 and command-line tools
+  * Android NDK 28.1.13356709 (r28b) - bundled 16 KB page-size alignment is required for Play for apps targeting API 35 or later
+  * AGP 8.10.1 and Gradle 8.11.1 (Gradle wrapper auto-downloads)
   * SDL3 Android AARs (auto-downloaded with SHA256 pinning by the `fetchSdl3Aars` Gradle task):
     * SDL3 3.4.8
     * SDL3_image 3.4.4
@@ -423,7 +423,7 @@ Install build dependencies. For a desktop Ubuntu installation:
 Install the Android SDK and NDK via `sdkmanager`:
 
 ```bash
-sdkmanager "platform-tools" "platforms;android-35" "ndk;28.1.13356709"
+sdkmanager "platform-tools" "platforms;android-36" "ndk;28.1.13356709"
 ```
 
 Export environment variables (add to `~/.bashrc` if useful):
