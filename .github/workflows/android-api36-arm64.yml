@@ -1,0 +1,120 @@
+name: CDDA Android ARM64 release candidate
+on:
+  push:
+    branches: [android/api-36-arm64-ci]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-api36-release-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  android:
+    name: Build and verify (${{ matrix.abi }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            gradle: -Pabi_arm_32=false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 92a5f19633ea18209d5e6ea5133761d672024520
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: ''
+      - name: Provision Android SDK and build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ccache gettext
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.1.13356709' 'cmake;3.22.1'
+      - name: Put Google Maven first and provide a Central mirror for this CI runner
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('android/build.gradle')
+          text = path.read_text()
+          for indent in ('        ', '    '):
+              old = indent + 'mavenCentral()\n' + indent + 'google()'
+              new = indent + 'google()\n' + indent + 'maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2") }\n' + indent + 'mavenCentral()'
+              assert text.count(old) == 1, repr(old)
+              text = text.replace(old, new)
+          path.write_text(text)
+          PY
+      - name: Compile experimental release
+        working-directory: android
+        env:
+          ABI: ${{ matrix.abi }}
+          ABI_FLAGS: ${{ matrix.gradle }}
+        run: |
+          tasks=(assembleExperimentalRelease)
+          if [[ "$ABI" == arm64-v8a ]]; then tasks+=(bundleExperimentalRelease); fi
+          read -r -a abi_flags <<< "$ABI_FLAGS"
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace -Pj=3 "${abi_flags[@]}" "${tasks[@]}"
+      - name: Sign APK for testing and verify target API and native alignment
+        env:
+          ABI: ${{ matrix.abi }}
+        run: |
+          set -euo pipefail
+          tools="$ANDROID_HOME/build-tools/36.0.0"
+          mkdir -p validation
+          apk=$(find android/app/build/outputs/apk/experimental/release -name '*.apk' -print -quit)
+          [[ -n "$apk" ]]
+          "$tools/zipalign" -P 16 -f 4 "$apk" "$RUNNER_TEMP/cdda-aligned.apk"
+          keytool -genkeypair -keystore "$RUNNER_TEMP/cdda-test.jks" -storepass android -keypass android -keyalg RSA -keysize 2048 -alias cdda-test -validity 365 -dname 'CN=CDDA API 36 CI test'
+          signed="validation/cdda-api36-$ABI-test.apk"
+          "$tools/apksigner" sign --ks "$RUNNER_TEMP/cdda-test.jks" --ks-pass pass:android --key-pass pass:android --out "$signed" "$RUNNER_TEMP/cdda-aligned.apk"
+          "$tools/apksigner" verify "$signed"
+          "$tools/zipalign" -P 16 -c 4 "$signed"
+          "$tools/aapt" dump badging "$signed" | tee validation/apk-manifest.txt
+          grep -Fx "targetSdkVersion:'36'" validation/apk-manifest.txt
+          if [[ "$ABI" == arm64-v8a ]]; then
+            cp android/app/build/outputs/bundle/experimentalRelease/*.aab validation/cdda-api36-unsigned.aab
+          fi
+          python3 - "$signed" validation/*.aab <<'PY' | tee validation/native-alignment.txt
+          import struct
+          import sys
+          import zipfile
+          from pathlib import Path
+          for filename in map(Path, sys.argv[1:]):
+              if filename.name == '*.aab':
+                  continue
+              with zipfile.ZipFile(filename) as package:
+                  libraries = [name for name in package.namelist() if name.startswith(('lib/', 'base/lib/')) and name.endswith('.so')]
+                  assert libraries, f'{filename}: no native libraries'
+                  for name in libraries:
+                      data = package.read(name)
+                      assert data.startswith(b'\x7fELF\x02\x01'), name
+                      offset = struct.unpack_from('<Q', data, 32)[0]
+                      size, count = struct.unpack_from('<HH', data, 54)
+                      loads = [struct.unpack_from('<Q', data, pos + 48)[0] for pos in range(offset, offset + size * count, size) if struct.unpack_from('<I', data, pos)[0] == 1]
+                      assert loads and min(loads) >= 16384, (name, loads)
+                      print(f'{filename.name}: {name} LOAD alignment {loads}')
+          PY
+      - name: Validate the unsigned Play bundle and confirm 16 KB APK split alignment
+        if: matrix.abi == 'arm64-v8a'
+        run: |
+          jar="$RUNNER_TEMP/bundletool.jar"
+          curl -fsSL --retry 3 https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar -o "$jar"
+          echo "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29  $jar" | sha256sum -c -
+          bundle=validation/cdda-api36-unsigned.aab
+          java -jar "$jar" validate --bundle="$bundle"
+          java -jar "$jar" dump config --bundle="$bundle" | tee validation/bundle-config.txt
+          grep -F PAGE_ALIGNMENT_16K validation/bundle-config.txt
+          (cd validation && sha256sum *.apk *.aab > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cdda-api36-${{ matrix.abi }}
+          path: validation/
+          if-no-files-found: ignore
+          retention-days: 14
