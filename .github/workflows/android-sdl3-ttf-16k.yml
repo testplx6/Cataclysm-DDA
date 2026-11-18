@@ -30,7 +30,16 @@ jobs:
           mkdir -p "$deps"
           curl --fail --silent --show-error --location --retry 3 -o "$deps/SDL3-devel-3.4.10-android.zip" https://github.com/libsdl-org/SDL/releases/download/release-3.4.10/SDL3-devel-3.4.10-android.zip
           echo "f676e29b1b4eb990e24862b6af5f327379dc496c9f5f3e3f48ab75837f95844e  $deps/SDL3-devel-3.4.10-android.zip" | sha256sum -c -
-          CMAKE_BUILD_PARALLEL_LEVEL=3 python3 build-scripts/build-release.py --actions android --android-api 21 --android-ndk-home "$ANDROID_HOME/ndk/28.1.13356709" --dependency-folder "$deps" --out "$RUNNER_TEMP/ttf-dist"
+          python3 - "$RUNNER_TEMP/ttf-release-android.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          source = json.loads(Path('build-scripts/release-info.json').read_text())
+          for platform in ('dmg', 'mingw', 'msvc'):
+              source.pop(platform, None)
+          Path(sys.argv[1]).write_text(json.dumps(source))
+          PY
+          CMAKE_BUILD_PARALLEL_LEVEL=3 python3 build-scripts/build-release.py --release-info "$RUNNER_TEMP/ttf-release-android.json" --actions android --android-api 21 --android-ndk-home "$ANDROID_HOME/ndk/28.1.13356709" --dependency-folder "$deps" --out "$RUNNER_TEMP/ttf-dist"
           archive="$RUNNER_TEMP/ttf-dist/SDL3_ttf-devel-3.2.3-android.zip"
           mkdir -p dist "$RUNNER_TEMP/ttf-verify"
           unzip -p "$archive" SDL3_ttf-3.2.3.aar >"$RUNNER_TEMP/ttf.aar"
@@ -38,7 +47,12 @@ jobs:
           for abi in arm64-v8a x86_64; do
             lib=$(find "$RUNNER_TEMP/ttf-verify" -path "*/android.$abi/libSDL3_ttf.so" -print -quit)
             test -n "$lib"
-            readelf -lW "$lib" | gawk '/^ *LOAD / { n++; print; if (strtonum($NF) < 16384) bad=1 } END { exit (!n || bad) }'
+            mapfile -t alignments < <(readelf -lW "$lib" | awk '/^ *LOAD / { print $NF }')
+            test -n "${alignments[0]:-}"
+            for alignment in "${alignments[@]}"; do
+              echo "$abi: LOAD $alignment"
+              (( alignment >= 16384 ))
+            done
           done
           cp "$archive" dist/
           cd dist
