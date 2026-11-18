@@ -1,0 +1,65 @@
+name: Build SDL3_ttf Android with 16 KB pages
+on:
+  push:
+    branches: [android/sdl3-ttf-16k-ci]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: libsdl-org/SDL_ttf
+          ref: d030c50a0a8cc5792ab8d18d86d48b21b4e5c170
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: ''
+      - name: Build pinned upstream SDL3_ttf Android distribution
+        run: |
+          set -euo pipefail
+          sdkmanager 'ndk;28.1.13356709' 'platforms;android-36'
+          deps="$RUNNER_TEMP/ttf-deps"
+          mkdir -p "$deps"
+          curl --fail --silent --show-error --location --retry 3 -o "$deps/SDL3-devel-3.4.10-android.zip" https://github.com/libsdl-org/SDL/releases/download/release-3.4.10/SDL3-devel-3.4.10-android.zip
+          echo "f676e29b1b4eb990e24862b6af5f327379dc496c9f5f3e3f48ab75837f95844e  $deps/SDL3-devel-3.4.10-android.zip" | sha256sum -c -
+          CMAKE_BUILD_PARALLEL_LEVEL=3 python3 build-scripts/build-release.py --actions android --android-api 21 --android-ndk-home "$ANDROID_HOME/ndk/28.1.13356709" --dependency-folder "$deps" --out "$RUNNER_TEMP/ttf-dist"
+          archive="$RUNNER_TEMP/ttf-dist/SDL3_ttf-devel-3.2.3-android.zip"
+          mkdir -p dist "$RUNNER_TEMP/ttf-verify"
+          unzip -p "$archive" SDL3_ttf-3.2.3.aar >"$RUNNER_TEMP/ttf.aar"
+          unzip -q "$RUNNER_TEMP/ttf.aar" 'prefab/modules/*/libs/*/*.so' -d "$RUNNER_TEMP/ttf-verify"
+          for abi in arm64-v8a x86_64; do
+            lib=$(find "$RUNNER_TEMP/ttf-verify" -path "*/android.$abi/libSDL3_ttf.so" -print -quit)
+            test -n "$lib"
+            readelf -lW "$lib" | gawk '/^ *LOAD / { n++; print; if (strtonum($NF) < 16384) bad=1 } END { exit (!n || bad) }'
+          done
+          cp "$archive" dist/
+          cd dist
+          sha256sum SDL3_ttf-devel-3.2.3-android.zip | tee SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdl3-ttf-android-16k
+          path: dist/*
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdl3-ttf-android-16k
+          path: dist
+      - name: Make the verified dependency available to the CDDA fork
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create sdl3-ttf-3.2.3-android-16k dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false --title 'SDL3_ttf 3.2.3 Android dependency (16 KB)' --notes 'Build dependency for this CDDA fork. Packaged from libsdl-org/SDL_ttf at d030c50a0a8cc5792ab8d18d86d48b21b4e5c170 with Android NDK r28b and SDL 3.4.10. The CI checks the ELF LOAD segment alignment for arm64-v8a and x86_64.'
