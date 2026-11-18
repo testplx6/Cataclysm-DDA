@@ -42,12 +42,10 @@ jobs:
           from pathlib import Path
           path = Path('android/build.gradle')
           text = path.read_text()
-          for indent in ('        ', '    '):
-              old = indent + 'mavenCentral()\n' + indent + 'google()'
-              new = indent + 'google()\n' + indent + 'maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2") }\n' + indent + 'mavenCentral()'
-              assert text.count(old) == 1, repr(old)
-              text = text.replace(old, new)
-          path.write_text(text)
+          old = '        mavenCentral()\n        google()'
+          new = '        google()\n        maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2") }\n        mavenCentral()'
+          assert text.count(old) == 2
+          path.write_text(text.replace(old, new))
           PY
       - name: Compile experimental release
         working-directory: android
